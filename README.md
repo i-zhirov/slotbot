@@ -1,18 +1,24 @@
-# Invitro appointment notification bot
+# Clinic appointment notification bot
 
-Telegram bot that watches the Invitro.ru online appointment system and notifies
-you when new slots appear for a doctor.
+Telegram bot that watches online appointment systems and notifies you when
+new slots appear for a doctor. Two providers are supported:
 
-Target doctor (configurable):
-<https://www.invitro.ru/kurgan/vrachi/ginekolog/19143/> — Хохлова Ольга Евгеньевна,
-гинеколог, МО Курган-4 (Гоголя 133).
+- **Invitro.ru** (default): <https://www.invitro.ru/kurgan/vrachi/ginekolog/19143/>
+  — Хохлова Ольга Евгеньевна, гинеколог, МО Курган-4 (Гоголя 133).
+- **harizma45.ru** (МЦ «Харизма», Курган, ул. Куйбышева, 27):
+  <https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/>
+  — Вождаева Анастасия Викторовна, врач УЗИ-диагностики.
+
+Select the provider with `INVITRO_PROVIDER` (`invitro` default, `harizma`).
 
 Written in Rust: a single static binary (~10 MB), no runtime dependencies —
-suitable for a small NixOS VPS. Polls the public JSON API of invitro.ru every
+suitable for a small NixOS VPS. Polls the clinic site every
 `INVITRO_POLL_INTERVAL_SECS` (default 120 s) with a browser-like User-Agent; no
 authentication or cookies are required.
 
 ## How it works
+
+### Invitro.ru
 
 The Invitro.ru frontend is a SPA backed by a public API at `https://www.invitro.ru/golk`.
 The bot reproduces the flow the web page uses:
@@ -28,6 +34,18 @@ The bot reproduces the flow the web page uses:
 5. `GET /appointments/api/v1/slots/doctors?...&slotDate=` — concrete times for
    each available date.
 
+### harizma45.ru
+
+harizma45.ru is a Bitrix site without a public JSON API. The only live
+availability signal is the server-rendered "ближайший прием: \<date\>" on the
+doctor's card of a `/register/...` page (there are no exact times, no 30-day
+calendar; when the card shows no date, the doctor has no online slots). The bot
+fetches the doctor's booking page each poll and parses that date, so a
+notification means "the doctor's next online appointment is now on this date".
+
+The register pages also list every doctor (all specialties) with their current
+"ближайший прием", which `--find` uses to search by name.
+
 New slots (office + service + date + time never seen before) trigger a Telegram
 message grouped by office/service. The set of already-notified slots is persisted
 in a state file, so restarts never re-notify.
@@ -39,11 +57,15 @@ in a state file, so restarts never re-notify.
 | `INVITRO_TELEGRAM_BOT_TOKEN` | — (required) | Bot token from [@BotFather](https://t.me/BotFather) |
 | `INVITRO_TELEGRAM_CHAT_ID` | — (required) | Comma-separated chat ids to send notifications to, e.g. `733839622,450097973` |
 | `INVITRO_DRY_RUN` | `0` | `1` = print notifications to stdout instead of sending |
-| `INVITRO_DOCTOR_BITRIX_ID` | `19143` | Numeric doctor id from the page URL |
+| `INVITRO_PROVIDER` | `invitro` | Clinic to watch: `invitro` or `harizma` |
+| `INVITRO_DOCTOR_BITRIX_ID` | `19143` | Numeric doctor id from the Invitro page URL |
 | `INVITRO_DOCTOR_NAME` | — | Alternative to `INVITRO_DOCTOR_BITRIX_ID`: find the doctor by name (exact full-name match preferred; ambiguous names are rejected with the candidate list) |
 | `INVITRO_CITY_SLUG` | `kurgan` | City slug from the page URL |
 | `INVITRO_SPECIALTY_SLUG` | (primary) | Specialty slug to watch, e.g. `ginekolog` |
 | `INVITRO_SERVICE_IDS` | (main service) | Comma-separated service UUIDs; if empty, only the doctor's main service (the one used by the "Записаться" flow) is watched — one notification per office |
+| `HARIZMA_DOCTOR_ID` | `940` | Internal schedule id of the harizma45.ru doctor |
+| `HARIZMA_PAGE_PATH` | `/register/uzi-diagnostika/vozhdaeva-anastasiya/` | Booking page path on harizma45.ru |
+| `HARIZMA_DOCTOR_NAME` | — | Alternative to `HARIZMA_DOCTOR_ID`: find the doctor by name on the register page |
 | `INVITRO_POLL_INTERVAL_SECS` | `120` | Seconds between polls |
 | `INVITRO_STATE_FILE` | `state.json` | Path of the de-duplication state file |
 | `INVITRO_NOTIFY_ON_FIRST_RUN` | `1` | `1` = notify about currently open slots on the first poll; `0` = record them as baseline silently |
@@ -56,16 +78,29 @@ cargo build --release
 # Inspect what the bot will watch (no Telegram credentials required):
 ./target/release/invitro-bot --check
 
-# Find a doctor's booking page by name:
+# Find a doctor's booking page by name (default provider: Invitro):
 ./target/release/invitro-bot --find "Хохлова"
 # -> Хохлова Ольга Евгеньевна (bitrix_id=19143, ...)
 #    booking page: https://www.invitro.ru/kurgan/vrachi/ginekolog/19143
+
+# The same commands for МЦ «Харизма»:
+INVITRO_PROVIDER=harizma ./target/release/invitro-bot --find "Вождаева"
+INVITRO_PROVIDER=harizma ./target/release/invitro-bot --check
+# -> Вождаева Анастасия Викторовна (id=940, врач УЗИ-диагностики)
+#    booking page: https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/
+#    Ближайший прием: ...
 
 # Run a single poll cycle (needs the two Telegram vars; use DRY_RUN=1 to test):
 INVITRO_DRY_RUN=1 \
 INVITRO_TELEGRAM_BOT_TOKEN=123:abc \
 INVITRO_TELEGRAM_CHAT_ID=456 \
 ./target/release/invitro-bot --once
+
+# Watch harizma45.ru for Вождаева:
+INVITRO_PROVIDER=harizma \
+INVITRO_TELEGRAM_BOT_TOKEN=123:abc \
+INVITRO_TELEGRAM_CHAT_ID=456 \
+./target/release/invitro-bot
 
 # Run the poll loop:
 INVITRO_TELEGRAM_BOT_TOKEN=123:abc \
@@ -113,16 +148,45 @@ INVITRO_TELEGRAM_CHAT_ID=456
 ```
 
 Everything else can be overridden through the module options
-(`doctorBitrixId`, `citySlug`, `specialtySlug`, `serviceIds`, `pollIntervalSecs`,
+(`provider`, `doctorBitrixId`, `citySlug`, `specialtySlug`, `serviceIds`,
+`harizmaDoctorId`, `harizmaPagePath`, `harizmaDoctorName`, `pollIntervalSecs`,
 `notifyOnFirstRun`).
 
-The service runs as a dynamic user with a hardened sandbox
-(`ProtectSystem=strict`, `NoNewPrivileges`, …), stores its state in
-`/var/lib/invitro-bot/state.json`, restarts on failure, and logs to journald:
+### Watching two clinics at once
 
-```sh
-journalctl -u invitro-bot -f
+Each module option group maps to one systemd unit, so several clinics can be
+watched simultaneously: the top-level options create the default `invitro-bot`
+unit, and every entry of `instances.<name>` creates an extra
+`invitro-bot-<name>` unit with its own state directory (and, optionally, its
+own `environmentFile`, `pollIntervalSecs`, …). Both clinics can notify the same
+Telegram chat or different ones.
+
+```nix
+services.invitroBot = {
+  enable = true;
+  package = inputs.invitro-notification-bot.packages.${pkgs.system}.default;
+  environmentFile = "/run/secrets/invitro-bot.env"; # shared Telegram credentials
+
+  # unit invitro-bot: Хохлова on Invitro.ru (defaults)
+  doctorBitrixId = 19143;
+
+  # unit invitro-bot-harizma: Вождаева on harizma45.ru
+  instances.harizma = {
+    provider = "harizma";
+    # HARIZMA_DOCTOR_ID / HARIZMA_PAGE_PATH default to Вождаева (id 940)
+  };
+};
 ```
+
+`journalctl -u invitro-bot -f` and `journalctl -u invitro-bot-harizma -f` show
+the logs of each instance. Use `enableDefaultInstance = false` to run only the
+named instances (e.g. only the harizma one), and `instances.<name>.enable =
+false` to keep a configured instance from running.
+
+The services run as dynamic users with a hardened sandbox
+(`ProtectSystem=strict`, `NoNewPrivileges`, …), store their state in
+`/var/lib/invitro-bot/state.json` / `/var/lib/invitro-bot-<name>/state.json`,
+restart on failure, and log to journald.
 
 You can also build or run the binary directly from the flake:
 
