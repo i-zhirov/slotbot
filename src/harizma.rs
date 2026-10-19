@@ -17,6 +17,7 @@ const SERVICE_NAME: &str = "Онлайн-запись";
 #[derive(Clone)]
 pub struct HarizmaClient {
     http: reqwest::Client,
+    base_url: String,
 }
 
 /// A doctor card as rendered in the carousel on a `/register/` page.
@@ -66,11 +67,28 @@ impl HarizmaClient {
             .user_agent(USER_AGENT)
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            base_url: BASE_URL.to_string(),
+        })
+    }
+
+    /// A client for tests: it talks to a local mock server and ignores proxies.
+    #[cfg(test)]
+    pub fn with_base_url(base_url: &str) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .no_proxy()
+            .build()
+            .context("failed to build HTTP client")?;
+        Ok(Self {
+            http,
+            base_url: base_url.to_string(),
+        })
     }
 
     async fn get_html(&self, path: &str) -> Result<String> {
-        let url = format!("{BASE_URL}{path}");
+        let url = format!("{}{path}", self.base_url);
         let resp = self
             .http
             .get(&url)
@@ -353,6 +371,7 @@ fn normalize_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_http::{MockServer, Route};
 
     const SAMPLE: &str = r#"
     <div id="owlReg" class="owl-carousel owl-theme">
@@ -514,5 +533,75 @@ mod tests {
             Some("2027-01-01")
         );
         assert!(parse_ru_date("не дата", "2026-10-19").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_doctors_fetches_register_page() {
+        let server = MockServer::start(vec![Route::html("/register/", SAMPLE)]).await;
+        let client = HarizmaClient::with_base_url(server.base_url()).unwrap();
+
+        let doctors = client.list_doctors().await.unwrap();
+
+        assert_eq!(doctors.len(), 2);
+        assert_eq!(doctors[0].full_name, "Стольникова Елена Сергеевна");
+        assert_eq!(doctors[1].full_name, "Вождаева Анастасия Викторовна");
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests()[0].target, "/register/");
+    }
+
+    #[tokio::test]
+    async fn list_doctors_rejects_page_without_cards() {
+        let server = MockServer::start(vec![Route::html("/register/", "<html></html>")]).await;
+        let client = HarizmaClient::with_base_url(server.base_url()).unwrap();
+
+        let err = client.list_doctors().await.unwrap_err().to_string();
+
+        assert!(err.contains("no doctor cards found"));
+    }
+
+    #[tokio::test]
+    async fn resolve_target_by_name_searches_register_page() {
+        let server = MockServer::start(vec![Route::html("/register/", SAMPLE)]).await;
+        let client = HarizmaClient::with_base_url(server.base_url()).unwrap();
+
+        let target = client
+            .resolve_target(0, "", Some("Вождаева"))
+            .await
+            .unwrap();
+
+        assert_eq!(target.doctor_id, 940);
+        assert_eq!(target.doctor_name, "Вождаева Анастасия Викторовна");
+        assert_eq!(target.job, "врач УЗИ-диагностики");
+        assert_eq!(
+            target.page_path,
+            "/register/uzi-diagnostika/vozhdaeva-anastasiya/"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_on_page_finds_doctor_by_id() {
+        let path = "/register/uzi-diagnostika/vozhdaeva-anastasiya/";
+        let server = MockServer::start(vec![Route::html(path, SAMPLE)]).await;
+        let client = HarizmaClient::with_base_url(server.base_url()).unwrap();
+
+        let item = client.doctor_on_page(path, 940).await.unwrap();
+
+        assert_eq!(item.full_name, "Вождаева Анастасия Викторовна");
+        assert_eq!(item.next_appointment, None);
+    }
+
+    #[tokio::test]
+    async fn doctor_on_page_rejects_unknown_id() {
+        let path = "/register/uzi-diagnostika/vozhdaeva-anastasiya/";
+        let server = MockServer::start(vec![Route::html(path, SAMPLE)]).await;
+        let client = HarizmaClient::with_base_url(server.base_url()).unwrap();
+
+        let err = client
+            .doctor_on_page(path, 999)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("doctor id 999 not found"));
     }
 }

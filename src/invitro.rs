@@ -16,6 +16,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 #[derive(Clone)]
 pub struct InvitroClient {
     http: reqwest::Client,
+    base_url: String,
 }
 
 impl InvitroClient {
@@ -24,7 +25,24 @@ impl InvitroClient {
             .user_agent(USER_AGENT)
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            base_url: BASE_URL.to_string(),
+        })
+    }
+
+    /// A client for tests: it talks to a local mock server and ignores proxies.
+    #[cfg(test)]
+    pub fn with_base_url(base_url: &str) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .no_proxy()
+            .build()
+            .context("failed to build HTTP client")?;
+        Ok(Self {
+            http,
+            base_url: base_url.to_string(),
+        })
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(
@@ -32,7 +50,7 @@ impl InvitroClient {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T> {
-        let url = format!("{BASE_URL}{path}");
+        let url = format!("{}{path}", self.base_url);
         let resp = self
             .http
             .get(&url)
@@ -56,7 +74,7 @@ impl InvitroClient {
         path: &str,
         body: serde_json::Value,
     ) -> Result<T> {
-        let url = format!("{BASE_URL}{path}");
+        let url = format!("{}{path}", self.base_url);
         let resp = self
             .http
             .post(&url)
@@ -598,6 +616,7 @@ fn normalize_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_http::{MockServer, Route};
 
     fn found(bitrix: u64, name: &str) -> FoundDoctor {
         FoundDoctor {
@@ -655,5 +674,119 @@ mod tests {
             InvitroClient::booking_page("kurgan", &d),
             "https://www.invitro.ru/kurgan/vrachi/ginekolog/19143"
         );
+    }
+
+    #[tokio::test]
+    async fn search_doctors_maps_batch_items() {
+        let server = MockServer::start(vec![
+            Route::json(
+                "/search/api/v1/search/doctors",
+                r#"{"group":"doctors","ids":["uuid-1","uuid-2"]}"#,
+            ),
+            Route::json(
+                "/doctors/api/v1/doctors/batch",
+                r#"[
+                    {"id":"uuid-1","bitrix_id":19143,"first_name":"Ольга",
+                     "middle_name":"Евгеньевна","last_name":"Хохлова",
+                     "speciality_slug":"ginekolog","experience":28},
+                    {"id":"uuid-2","bitrix_id":7,"first_name":"Иван",
+                     "middle_name":"Сергеевич","last_name":"Петров"}
+                ]"#,
+            ),
+        ])
+        .await;
+        let client = InvitroClient::with_base_url(server.base_url()).unwrap();
+        let city = City {
+            id: "city-1".into(),
+            name: "Курган".into(),
+            slug: "kurgan".into(),
+        };
+
+        let doctors = client.search_doctors(&city, "Хохлова").await.unwrap();
+
+        assert_eq!(doctors.len(), 2);
+        assert_eq!(doctors[0].uuid, "uuid-1");
+        assert_eq!(doctors[0].bitrix_id, 19143);
+        assert_eq!(doctors[0].full_name, "Хохлова Ольга Евгеньевна");
+        assert_eq!(doctors[0].specialty_slug, "ginekolog");
+        assert_eq!(doctors[0].experience, 28);
+        assert_eq!(doctors[1].full_name, "Петров Иван Сергеевич");
+        assert_eq!(doctors[1].specialty_slug, "");
+        assert_eq!(doctors[1].experience, 0);
+
+        // The name query is scoped to the city.
+        let requests = server.requests();
+        let search = requests
+            .iter()
+            .find(|r| r.target.starts_with("/search/api/v1/search/doctors"))
+            .expect("search request");
+        assert_eq!(search.method, "GET");
+        assert!(search.target.contains("q="));
+        assert!(search.target.contains("cityId=city-1"));
+
+        let batch = requests
+            .iter()
+            .find(|r| r.target == "/doctors/api/v1/doctors/batch")
+            .expect("batch request");
+        assert_eq!(batch.method, "POST");
+        let sent: serde_json::Value = serde_json::from_str(&batch.body).unwrap();
+        assert_eq!(sent["ids"], serde_json::json!(["uuid-1", "uuid-2"]));
+    }
+
+    #[tokio::test]
+    async fn search_doctors_returns_empty_without_ids() {
+        let server = MockServer::start(vec![Route::json(
+            "/search/api/v1/search/doctors",
+            r#"{"group":"doctors","ids":[]}"#,
+        )])
+        .await;
+        let client = InvitroClient::with_base_url(server.base_url()).unwrap();
+        let city = City {
+            id: "city-1".into(),
+            name: "Курган".into(),
+            slug: "kurgan".into(),
+        };
+
+        let doctors = client.search_doctors(&city, "Никто").await.unwrap();
+
+        assert!(doctors.is_empty());
+        // No ids: the batch request must not be sent.
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn city_by_slug_prefers_exact_match() {
+        let server = MockServer::start(vec![Route::json(
+            "/addresses/api/v1/cities",
+            r#"{"cities":[
+                {"id":"1","name":"Матвеев Курган","slug":"matveev-kurgan"},
+                {"id":"2","name":"Курган","slug":"kurgan"}
+            ]}"#,
+        )])
+        .await;
+        let client = InvitroClient::with_base_url(server.base_url()).unwrap();
+
+        let city = client.city_by_slug("kurgan").await.unwrap();
+
+        assert_eq!(city.id, "2");
+        assert_eq!(city.name, "Курган");
+    }
+
+    #[tokio::test]
+    async fn city_by_slug_rejects_empty_response() {
+        let server = MockServer::start(vec![Route::json(
+            "/addresses/api/v1/cities",
+            r#"{"cities":[]}"#,
+        )])
+        .await;
+        let client = InvitroClient::with_base_url(server.base_url()).unwrap();
+
+        let err = client
+            .city_by_slug("nowhere")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("city with slug 'nowhere' not found"));
     }
 }
