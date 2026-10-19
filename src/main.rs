@@ -289,7 +289,7 @@ async fn find_mode(query: &str) -> Result<()> {
 
 async fn find_mode_invitro(query: &str) -> Result<()> {
     if query.is_empty() {
-        anyhow::bail!("usage: invitro-bot --find <doctor name>");
+        anyhow::bail!("usage: slotbot --find <doctor name>");
     }
     let client = InvitroClient::new()?;
     let city_slug = std::env::var("INVITRO_CITY_SLUG").unwrap_or_else(|_| "kurgan".into());
@@ -321,7 +321,7 @@ async fn find_mode_invitro(query: &str) -> Result<()> {
 
 async fn find_mode_harizma(query: &str) -> Result<()> {
     if query.is_empty() {
-        anyhow::bail!("usage: invitro-bot --find <doctor name>");
+        anyhow::bail!("usage: slotbot --find <doctor name>");
     }
     let client = HarizmaClient::new()?;
     let doctors = client.list_doctors().await?;

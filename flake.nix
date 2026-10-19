@@ -1,5 +1,5 @@
 {
-  description = "Invitro.ru doctor appointment Telegram notifier";
+  description = "Telegram bot that watches clinic appointment systems for new doctor slots";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,7 +13,7 @@
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "invitro-bot";
+          pname = "slotbot";
           version = "0.1.0";
           src = ./.;
 
@@ -24,9 +24,9 @@
           nativeBuildInputs = [ pkgs.pkg-config ];
 
           meta = {
-            description = "Telegram notifier for Invitro.ru doctor appointments";
+            description = "Telegram notifier for clinic doctor appointment slots";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "invitro-bot";
+            mainProgram = "slotbot";
           };
         };
 

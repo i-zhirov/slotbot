@@ -17,12 +17,12 @@ impl Telegram {
         }
         let mut builder = reqwest::Client::builder();
         // Optional outbound proxy for networks where api.telegram.org is
-        // blocked, e.g. INVITRO_HTTPS_PROXY=socks5h://127.0.0.1:1080
-        if let Ok(proxy) = std::env::var("INVITRO_HTTPS_PROXY") {
+        // blocked, e.g. SLOTBOT_HTTPS_PROXY=socks5h://127.0.0.1:1080
+        if let Ok(proxy) = std::env::var("SLOTBOT_HTTPS_PROXY") {
             if !proxy.is_empty() {
                 builder = builder.proxy(
                     reqwest::Proxy::all(&proxy)
-                        .with_context(|| format!("invalid INVITRO_HTTPS_PROXY: {proxy}"))?,
+                        .with_context(|| format!("invalid SLOTBOT_HTTPS_PROXY: {proxy}"))?,
                 );
             }
         }

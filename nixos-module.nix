@@ -1,30 +1,30 @@
-# NixOS module for the clinic appointment notifier (invitro-bot).
+# NixOS module for the clinic appointment notifier (slotbot).
 #
 # Usage in configuration.nix (default: one unit watching Invitro.ru):
 #
-#   services.invitroBot = {
+#   services.slotbot = {
 #     enable = true;
-#     package = inputs.invitro-notification-bot.packages.${pkgs.system}.default;
-#     environmentFile = "/run/secrets/invitro-bot.env"; # INVITRO_TELEGRAM_BOT_TOKEN, INVITRO_TELEGRAM_CHAT_ID
+#     package = inputs.slotbot.packages.${pkgs.system}.default;
+#     environmentFile = "/run/secrets/slotbot.env"; # SLOTBOT_TELEGRAM_BOT_TOKEN, SLOTBOT_TELEGRAM_CHAT_ID
 #   };
 #
 # To watch a second clinic at the same time (e.g. МЦ «Харизма»), add an
 # instance — each one becomes its own systemd unit and state file:
 #
-#   services.invitroBot = {
+#   services.slotbot = {
 #     enable = true;
 #     package = ...;
-#     environmentFile = "/run/secrets/invitro-bot.env";
-#     instances.harizma = { provider = "harizma"; };   # unit invitro-bot-harizma
+#     environmentFile = "/run/secrets/slotbot.env";
+#     instances.harizma = { provider = "harizma"; };   # unit slotbot-harizma
 #   };
 #
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.invitroBot;
+  cfg = config.services.slotbot;
 
   # Options shared by every watch instance: the legacy top-level options of the
-  # "default" instance and each entry of `services.invitroBot.instances.<name>`.
+  # "default" instance and each entry of `services.slotbot.instances.<name>`.
   instanceOptions = {
     provider = lib.mkOption {
       type = lib.types.str;
@@ -107,13 +107,13 @@ let
     stateDirectory = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "systemd StateDirectory name. Defaults to `invitro-bot` for the default instance and `invitro-bot-<name>` for named instances.";
+      description = "systemd StateDirectory name. Defaults to `slotbot` for the default instance and `slotbot-<name>` for named instances.";
     };
 
     extraEnvironment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      description = "Additional INVITRO_*/HARIZMA_* environment variables for this instance (merged with the top-level ones).";
+      description = "Additional SLOTBOT_*/INVITRO_*/HARIZMA_* environment variables for this instance (merged with the top-level ones).";
     };
   };
 
@@ -121,17 +121,17 @@ let
   effective = { name, inst }:
     let
       stateDirectory = if inst.stateDirectory != null then inst.stateDirectory
-        else if name == "default" then "invitro-bot"
-        else "invitro-bot-${name}";
+        else if name == "default" then "slotbot"
+        else "slotbot-${name}";
       stateFile = if inst.stateFile != null then inst.stateFile
         else "/var/lib/${stateDirectory}/state.json";
       env = [
-        "INVITRO_PROVIDER=${inst.provider}"
+        "SLOTBOT_PROVIDER=${inst.provider}"
         "INVITRO_DOCTOR_BITRIX_ID=${toString inst.doctorBitrixId}"
         "INVITRO_CITY_SLUG=${inst.citySlug}"
-        "INVITRO_POLL_INTERVAL_SECS=${toString inst.pollIntervalSecs}"
-        "INVITRO_STATE_FILE=${stateFile}"
-        "INVITRO_NOTIFY_ON_FIRST_RUN=${if inst.notifyOnFirstRun then "1" else "0"}"
+        "SLOTBOT_POLL_INTERVAL_SECS=${toString inst.pollIntervalSecs}"
+        "SLOTBOT_STATE_FILE=${stateFile}"
+        "SLOTBOT_NOTIFY_ON_FIRST_RUN=${if inst.notifyOnFirstRun then "1" else "0"}"
         "HARIZMA_DOCTOR_ID=${toString inst.harizmaDoctorId}"
         "HARIZMA_PAGE_PATH=${inst.harizmaPagePath}"
       ] ++ lib.optional (inst.doctorName != null) "INVITRO_DOCTOR_NAME=${inst.doctorName}"
@@ -154,7 +154,7 @@ let
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/invitro-bot";
+        ExecStart = "${cfg.package}/bin/slotbot";
         Restart = "always";
         RestartSec = "10s";
 
@@ -181,12 +181,12 @@ let
     };
 in
 {
-  options.services.invitroBot = {
+  options.services.slotbot = {
     enable = lib.mkEnableOption "clinic doctor appointment Telegram notifier";
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The invitro-bot package to run.";
+      description = "The slotbot package to run.";
     };
 
     environmentFile = lib.mkOption {
@@ -194,8 +194,8 @@ in
       default = null;
       description = ''
         Path to an EnvironmentFile with secrets, at least:
-          INVITRO_TELEGRAM_BOT_TOKEN=<token from @BotFather>
-          INVITRO_TELEGRAM_CHAT_ID=<chat id to notify>
+          SLOTBOT_TELEGRAM_BOT_TOKEN=<token from @BotFather>
+          SLOTBOT_TELEGRAM_CHAT_ID=<chat id to notify>
         Instances inherit this unless they set their own `environmentFile`.
       '';
     };
@@ -203,7 +203,7 @@ in
     enableDefaultInstance = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Create the default `invitro-bot` unit from the top-level options (the legacy single-instance configuration).";
+      description = "Create the default `slotbot` unit from the top-level options (the legacy single-instance configuration).";
     };
 
     instances = lib.mkOption {
@@ -224,7 +224,7 @@ in
       default = { };
       description = ''
         Additional watch instances. Each becomes its own hardened systemd
-        unit `invitro-bot-<name>` with its own state directory, so several
+        unit `slotbot-<name>` with its own state directory, so several
         clinics can be watched at the same time, e.g.:
 
         instances.harizma.provider = "harizma"; # Вождаева on harizma45.ru
@@ -236,7 +236,7 @@ in
     systemd.services =
       (if cfg.enableDefaultInstance
         then {
-          "invitro-bot" = mkUnit {
+          "slotbot" = mkUnit {
             name = "default";
             inst = cfg;
             environmentFile = cfg.environmentFile;
@@ -245,7 +245,7 @@ in
         }
         else { })
       // lib.mapAttrs' (name: inst:
-        lib.nameValuePair "invitro-bot-${name}" (mkUnit {
+        lib.nameValuePair "slotbot-${name}" (mkUnit {
           inherit name;
           inst = inst;
           environmentFile = if inst.environmentFile != null then inst.environmentFile else cfg.environmentFile;

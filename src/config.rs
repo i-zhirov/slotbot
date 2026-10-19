@@ -10,10 +10,10 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Read `INVITRO_PROVIDER` from the environment (`invitro` default,
+    /// Read `SLOTBOT_PROVIDER` from the environment (`invitro` default,
     /// `harizma` supported). Unknown values fall back to `invitro`.
     pub fn from_env() -> Self {
-        parse_provider(&std::env::var("INVITRO_PROVIDER").unwrap_or_default())
+        parse_provider(&std::env::var("SLOTBOT_PROVIDER").unwrap_or_default())
     }
 }
 
@@ -26,12 +26,12 @@ fn parse_provider(raw: &str) -> Provider {
 
 /// Runtime configuration, read from environment variables.
 ///
-/// All variables use the `INVITRO_` prefix:
-/// - `INVITRO_TELEGRAM_BOT_TOKEN` (required) — Telegram bot token from @BotFather
-/// - `INVITRO_TELEGRAM_CHAT_ID` (required) — comma-separated chat ids to send
+/// Shared variables use the `SLOTBOT_` prefix:
+/// - `SLOTBOT_TELEGRAM_BOT_TOKEN` (required) — Telegram bot token from @BotFather
+/// - `SLOTBOT_TELEGRAM_CHAT_ID` (required) — comma-separated chat ids to send
 ///   notifications to (e.g. `123,-100456`)
-/// - `INVITRO_DRY_RUN` — if `1`, print notifications to stdout instead of sending (default: 0)
-/// - `INVITRO_PROVIDER` — clinic to watch: `invitro` (default) or `harizma`
+/// - `SLOTBOT_DRY_RUN` — if `1`, print notifications to stdout instead of sending (default: 0)
+/// - `SLOTBOT_PROVIDER` — clinic to watch: `invitro` (default) or `harizma`
 ///
 /// Invitro.ru:
 /// - `INVITRO_DOCTOR_BITRIX_ID` — numeric doctor id from the page URL (default: 19143)
@@ -50,9 +50,9 @@ fn parse_provider(raw: &str) -> Provider {
 ///   site's register page (exact match preferred; ambiguous names are rejected)
 ///
 /// Common:
-/// - `INVITRO_POLL_INTERVAL_SECS` — seconds between polls (default: 120)
-/// - `INVITRO_STATE_FILE` — path of the JSON state file (default: ./state.json)
-/// - `INVITRO_NOTIFY_ON_FIRST_RUN` — if `1`, notify about slots available on the very
+/// - `SLOTBOT_POLL_INTERVAL_SECS` — seconds between polls (default: 120)
+/// - `SLOTBOT_STATE_FILE` — path of the JSON state file (default: ./state.json)
+/// - `SLOTBOT_NOTIFY_ON_FIRST_RUN` — if `1`, notify about slots available on the very
 ///   first poll (default: 1)
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -75,18 +75,18 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let telegram_bot_token = env_req("INVITRO_TELEGRAM_BOT_TOKEN")?;
-        let telegram_chat_ids = parse_chat_ids(&env_req("INVITRO_TELEGRAM_CHAT_ID")?)?;
+        let telegram_bot_token = env_req("SLOTBOT_TELEGRAM_BOT_TOKEN")?;
+        let telegram_chat_ids = parse_chat_ids(&env_req("SLOTBOT_TELEGRAM_CHAT_ID")?)?;
         if telegram_chat_ids.is_empty() {
-            anyhow::bail!("INVITRO_TELEGRAM_CHAT_ID must contain at least one chat id");
+            anyhow::bail!("SLOTBOT_TELEGRAM_CHAT_ID must contain at least one chat id");
         }
 
         let doctor_bitrix_id = env_or("INVITRO_DOCTOR_BITRIX_ID", "19143")
             .parse()
             .context("INVITRO_DOCTOR_BITRIX_ID must be a number")?;
-        let poll_interval_secs: u64 = env_or("INVITRO_POLL_INTERVAL_SECS", "120")
+        let poll_interval_secs: u64 = env_or("SLOTBOT_POLL_INTERVAL_SECS", "120")
             .parse()
-            .context("INVITRO_POLL_INTERVAL_SECS must be a number")?;
+            .context("SLOTBOT_POLL_INTERVAL_SECS must be a number")?;
 
         let harizma_doctor_id: u64 = env_or("HARIZMA_DOCTOR_ID", "940")
             .parse()
@@ -102,7 +102,7 @@ impl Config {
             provider: Provider::from_env(),
             telegram_bot_token,
             telegram_chat_ids,
-            dry_run: env_or("INVITRO_DRY_RUN", "0") == "1",
+            dry_run: env_or("SLOTBOT_DRY_RUN", "0") == "1",
             doctor_bitrix_id,
             doctor_name: env_opt("INVITRO_DOCTOR_NAME"),
             city_slug: env_or("INVITRO_CITY_SLUG", "kurgan"),
@@ -115,8 +115,8 @@ impl Config {
             ),
             harizma_doctor_name: env_opt("HARIZMA_DOCTOR_NAME"),
             poll_interval_secs,
-            state_file: PathBuf::from(env_or("INVITRO_STATE_FILE", "state.json")),
-            notify_on_first_run: env_or("INVITRO_NOTIFY_ON_FIRST_RUN", "1") == "1",
+            state_file: PathBuf::from(env_or("SLOTBOT_STATE_FILE", "state.json")),
+            notify_on_first_run: env_or("SLOTBOT_NOTIFY_ON_FIRST_RUN", "1") == "1",
         })
     }
 }

@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_contains() {
-        let dir = std::env::temp_dir().join(format!("invitro-bot-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("slotbot-test-{}", std::process::id()));
         let path = dir.join("state.json");
         let _ = std::fs::remove_file(&path);
 

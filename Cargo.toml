@@ -1,8 +1,8 @@
 [package]
-name = "invitro-bot"
+name = "slotbot"
 version = "0.1.0"
 edition = "2021"
-description = "Telegram notification bot that watches Invitro.ru doctor appointments"
+description = "Telegram bot that watches clinic appointment systems for new doctor slots"
 license = "MIT"
 
 [dependencies]
