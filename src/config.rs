@@ -37,7 +37,8 @@ fn parse_provider(raw: &str) -> Provider {
 /// - `INVITRO_DOCTOR_BITRIX_ID` — numeric doctor id from the page URL (default: 19143)
 /// - `INVITRO_DOCTOR_NAME` — alternatively, find the doctor by name (exact match
 ///   preferred; ambiguous names are rejected)
-/// - `INVITRO_CITY_SLUG` — city slug from the page URL (default: kurgan)
+/// - `INVITRO_CITY_SLUG` — city slug from the page URL (default: kurgan);
+///   the `--find` command accepts `--city <slug>` to override it
 /// - `INVITRO_SPECIALTY_SLUG` — specialty to watch (default: primary one)
 /// - `INVITRO_SERVICE_IDS` — comma-separated service UUIDs to watch; default: the
 ///   doctor's main service (the one used by the site's booking flow)
@@ -118,6 +119,30 @@ impl Config {
             state_file: PathBuf::from(env_or("SLOTBOT_STATE_FILE", "state.json")),
             notify_on_first_run: env_or("SLOTBOT_NOTIFY_ON_FIRST_RUN", "1") == "1",
         })
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    /// A minimal configuration for tests.
+    pub fn test_default() -> Self {
+        Config {
+            provider: Provider::Invitro,
+            telegram_bot_token: String::new(),
+            telegram_chat_ids: Vec::new(),
+            dry_run: true,
+            doctor_bitrix_id: 19143,
+            doctor_name: None,
+            city_slug: "kurgan".into(),
+            specialty_slug: None,
+            service_ids: Vec::new(),
+            harizma_doctor_id: 940,
+            harizma_page_path: String::new(),
+            harizma_doctor_name: None,
+            poll_interval_secs: 120,
+            state_file: PathBuf::new(),
+            notify_on_first_run: false,
+        }
     }
 }
 

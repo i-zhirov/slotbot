@@ -6,6 +6,9 @@ mod slots;
 mod state;
 mod telegram;
 
+#[cfg(test)]
+mod test_http;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -34,8 +37,8 @@ async fn main() -> Result<()> {
     let once = args.iter().any(|a| a == "--once");
 
     if let Some(pos) = args.iter().position(|a| a == "--find") {
-        let query = args[pos + 1..].join(" ");
-        return find_mode(&query).await;
+        let (query, city) = parse_find_args(&args[pos + 1..])?;
+        return find_mode(&query, city.as_deref()).await;
     }
 
     if check {
@@ -277,22 +280,47 @@ async fn process_new_slots(
 
 // ---------- find & check ----------
 
-/// `--find <name>`: search the configured provider for doctors by name and
-/// print their booking pages (no Telegram credentials required). Exits with
-/// code 1 if nothing found.
-async fn find_mode(query: &str) -> Result<()> {
+/// Parse the arguments after `--find`: the doctor name and an optional
+/// `--city <slug>` (Invitro only). The name may contain spaces and may come
+/// before or after `--city`.
+fn parse_find_args(args: &[String]) -> Result<(String, Option<String>)> {
+    let mut words = Vec::new();
+    let mut city = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--city" {
+            let value = iter
+                .next()
+                .context("--city needs a city slug, e.g. --city moscow")?;
+            if value.trim().is_empty() {
+                anyhow::bail!("--city needs a city slug, e.g. --city moscow");
+            }
+            city = Some(value.clone());
+        } else {
+            words.push(arg.clone());
+        }
+    }
+    Ok((words.join(" "), city))
+}
+
+/// `--find <name> [--city <slug>]`: search the configured provider for
+/// doctors by name and print their booking pages (no Telegram credentials
+/// required). Exits with code 1 if nothing found.
+async fn find_mode(query: &str, city: Option<&str>) -> Result<()> {
     match Provider::from_env() {
-        Provider::Invitro => find_mode_invitro(query).await,
-        Provider::Harizma => find_mode_harizma(query).await,
+        Provider::Invitro => find_mode_invitro(query, city).await,
+        Provider::Harizma => find_mode_harizma(query, city).await,
     }
 }
 
-async fn find_mode_invitro(query: &str) -> Result<()> {
+async fn find_mode_invitro(query: &str, city: Option<&str>) -> Result<()> {
     if query.is_empty() {
-        anyhow::bail!("usage: slotbot --find <doctor name>");
+        anyhow::bail!("usage: slotbot --find <doctor name> [--city <slug>]");
     }
     let client = InvitroClient::new()?;
-    let city_slug = std::env::var("INVITRO_CITY_SLUG").unwrap_or_else(|_| "kurgan".into());
+    let city_slug = city
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("INVITRO_CITY_SLUG").unwrap_or_else(|_| "kurgan".into()));
     let city = client.city_by_slug(&city_slug).await?;
     let doctors = client.search_doctors(&city, query).await?;
 
@@ -319,9 +347,12 @@ async fn find_mode_invitro(query: &str) -> Result<()> {
     Ok(())
 }
 
-async fn find_mode_harizma(query: &str) -> Result<()> {
+async fn find_mode_harizma(query: &str, city: Option<&str>) -> Result<()> {
     if query.is_empty() {
         anyhow::bail!("usage: slotbot --find <doctor name>");
+    }
+    if city.is_some() {
+        anyhow::bail!("--city is not supported for the harizma provider (one clinic in Курган)");
     }
     let client = HarizmaClient::new()?;
     let doctors = client.list_doctors().await?;
@@ -494,4 +525,128 @@ fn normalize_name(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_http::{MockServer, Route};
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn find_parses_name_without_city() {
+        let (query, city) = parse_find_args(&args(&["Хохлова"])).unwrap();
+        assert_eq!(query, "Хохлова");
+        assert_eq!(city, None);
+    }
+
+    #[test]
+    fn find_parses_city_after_name() {
+        let (query, city) =
+            parse_find_args(&args(&["Хохлова", "Ольга", "--city", "moscow"])).unwrap();
+        assert_eq!(query, "Хохлова Ольга");
+        assert_eq!(city.as_deref(), Some("moscow"));
+    }
+
+    #[test]
+    fn find_parses_city_before_name() {
+        let (query, city) = parse_find_args(&args(&["--city", "moscow", "Хохлова"])).unwrap();
+        assert_eq!(query, "Хохлова");
+        assert_eq!(city.as_deref(), Some("moscow"));
+    }
+
+    #[test]
+    fn find_rejects_city_without_value() {
+        let err = parse_find_args(&args(&["Хохлова", "--city"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--city needs a city slug"));
+    }
+
+    #[test]
+    fn find_rejects_empty_city() {
+        let err = parse_find_args(&args(&["Хохлова", "--city", ""]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--city needs a city slug"));
+    }
+
+    #[tokio::test]
+    async fn find_harizma_rejects_city() {
+        let err = find_mode_harizma("Вождаева", Some("kurgan"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--city is not supported"));
+    }
+
+    /// The full name-search flow: city lookup, search API, batch details,
+    /// doctor picking and target resolution against a mock server.
+    #[tokio::test]
+    async fn resolve_by_name_finds_doctor_and_target() {
+        let server = MockServer::start(vec![
+            Route::json(
+                "/addresses/api/v1/cities",
+                r#"{"cities":[{"id":"city-1","name":"Курган","slug":"kurgan"}]}"#,
+            ),
+            Route::json(
+                "/search/api/v1/search/doctors",
+                r#"{"group":"doctors","ids":["uuid-1"]}"#,
+            ),
+            Route::json(
+                "/doctors/api/v1/doctors/batch",
+                r#"[{"id":"uuid-1","bitrix_id":19143,"first_name":"Ольга",
+                     "middle_name":"Евгеньевна","last_name":"Хохлова",
+                     "speciality_slug":"ginekolog","experience":28}]"#,
+            ),
+            Route::json(
+                "/doctors/api/v1/mapper/doctors/bitrix/19143",
+                r#"{"uuid":"uuid-1"}"#,
+            ),
+            Route::json(
+                "/appointments/api/v1/doctors/uuid-1/",
+                r#"{"first_name":"Ольга","middle_name":"Евгеньевна",
+                    "last_name":"Хохлова","specialties":[{"id":"spec-1",
+                    "slug":"ginekolog","custom_name":"Гинеколог",
+                    "is_primary":true}]}"#,
+            ),
+            Route::json(
+                "/appointments/api/v1/doctors/uuid-1/specialties/spec-1/",
+                r#"{"offices":[{"office":{"id":"office-1","name":"МО Курган-4"},
+                    "main_service_id":"svc-1","services":[{"service_id":"svc-1",
+                    "name":"Прием врача в клинике","price":"3700.00"}]}]}"#,
+            ),
+            Route::json(
+                "/addresses/api/v1/medical-offices/office-1",
+                r#"{"city_id":"city-1","city_name":"Курган"}"#,
+            ),
+        ])
+        .await;
+        let client = InvitroClient::with_base_url(server.base_url()).unwrap();
+        let cfg = config::Config::test_default();
+
+        let target = resolve_by_name(&client, &cfg, "Хохлова").await.unwrap();
+
+        assert_eq!(target.doctor_name, "Хохлова Ольга Евгеньевна");
+        assert_eq!(target.doctor_bitrix_id, 19143);
+        assert_eq!(target.city.slug, "kurgan");
+        assert_eq!(target.specialty_name, "Гинеколог");
+        assert_eq!(target.entries.len(), 1);
+        assert_eq!(target.entries[0].office_name, "МО Курган-4");
+        assert_eq!(
+            target.booking_link(),
+            "https://www.invitro.ru/kurgan/vrachi/ginekolog/19143/"
+        );
+
+        // The name query is scoped to the configured city.
+        let requests = server.requests();
+        let search = requests
+            .iter()
+            .find(|r| r.target.starts_with("/search/api/v1/search/doctors"))
+            .expect("search request");
+        assert!(search.target.contains("cityId=city-1"));
+    }
 }

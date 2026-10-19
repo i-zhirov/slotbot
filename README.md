@@ -63,7 +63,7 @@ Shared variables use the `SLOTBOT_` prefix. Provider-specific variables use the
 | `SLOTBOT_PROVIDER` | `invitro` | Clinic to watch: `invitro` or `harizma` |
 | `INVITRO_DOCTOR_BITRIX_ID` | `19143` | Numeric doctor id from the Invitro page URL |
 | `INVITRO_DOCTOR_NAME` | — | Alternative to `INVITRO_DOCTOR_BITRIX_ID`: find the doctor by name (exact full-name match preferred; ambiguous names are rejected with the candidate list) |
-| `INVITRO_CITY_SLUG` | `kurgan` | City slug from the page URL |
+| `INVITRO_CITY_SLUG` | `kurgan` | City slug from the page URL; `--find --city <slug>` overrides it for the search |
 | `INVITRO_SPECIALTY_SLUG` | (primary) | Specialty slug to watch, e.g. `ginekolog` |
 | `INVITRO_SERVICE_IDS` | (main service) | Comma-separated service UUIDs; if empty, only the doctor's main service (the one used by the "Записаться" flow) is watched — one notification per office |
 | `HARIZMA_DOCTOR_ID` | `940` | Internal schedule id of the harizma45.ru doctor |
@@ -78,13 +78,20 @@ Shared variables use the `SLOTBOT_` prefix. Provider-specific variables use the
 ```sh
 cargo build --release
 
+# Run the unit tests (they use a local mock server, no network access):
+cargo test
+
 # Inspect what the bot will watch (no Telegram credentials required):
 ./target/release/slotbot --check
 
-# Find a doctor's booking page by name (default provider: Invitro):
+# Find a doctor's booking page by name (default provider: Invitro,
+# city from INVITRO_CITY_SLUG):
 ./target/release/slotbot --find "Хохлова"
 # -> Хохлова Ольга Евгеньевна (bitrix_id=19143, ...)
 #    booking page: https://www.invitro.ru/kurgan/vrachi/ginekolog/19143
+
+# Search in another city with --city (Invitro only; overrides INVITRO_CITY_SLUG):
+./target/release/slotbot --find "Хохлова" --city moscow
 
 # The same commands for МЦ «Харизма»:
 SLOTBOT_PROVIDER=harizma ./target/release/slotbot --find "Вождаева"
