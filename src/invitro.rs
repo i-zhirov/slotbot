@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::slots::AvailableSlot;
+
 const BASE_URL: &str = "https://www.invitro.ru/golk";
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -384,16 +386,20 @@ pub struct WatchTarget {
     pub entries: Vec<WatchEntry>,
 }
 
-/// One concrete available date+time at an office for a service.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AvailableSlot {
-    pub office_id: String,
-    pub office_name: String,
-    pub service_id: String,
-    pub service_name: String,
-    pub price: String,
-    pub date: String,
-    pub time: String,
+impl WatchTarget {
+    /// Booking page URL of the watched doctor, e.g.
+    /// `https://www.invitro.ru/kurgan/vrachi/ginekolog/19143/`.
+    pub fn booking_link(&self) -> String {
+        let slug = self
+            .specialty_slug
+            .as_deref()
+            .unwrap_or("ginekolog")
+            .to_lowercase();
+        format!(
+            "https://www.invitro.ru/{}/vrachi/{}/{}/",
+            self.city.slug, slug, self.doctor_bitrix_id
+        )
+    }
 }
 
 impl InvitroClient {

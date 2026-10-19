@@ -2,6 +2,28 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+/// Which clinic's booking system to watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Invitro,
+    Harizma,
+}
+
+impl Provider {
+    /// Read `INVITRO_PROVIDER` from the environment (`invitro` default,
+    /// `harizma` supported). Unknown values fall back to `invitro`.
+    pub fn from_env() -> Self {
+        parse_provider(&std::env::var("INVITRO_PROVIDER").unwrap_or_default())
+    }
+}
+
+fn parse_provider(raw: &str) -> Provider {
+    match raw.trim().to_lowercase().as_str() {
+        "harizma" => Provider::Harizma,
+        _ => Provider::Invitro,
+    }
+}
+
 /// Runtime configuration, read from environment variables.
 ///
 /// All variables use the `INVITRO_` prefix:
@@ -9,6 +31,9 @@ use anyhow::{Context, Result};
 /// - `INVITRO_TELEGRAM_CHAT_ID` (required) — comma-separated chat ids to send
 ///   notifications to (e.g. `123,-100456`)
 /// - `INVITRO_DRY_RUN` — if `1`, print notifications to stdout instead of sending (default: 0)
+/// - `INVITRO_PROVIDER` — clinic to watch: `invitro` (default) or `harizma`
+///
+/// Invitro.ru:
 /// - `INVITRO_DOCTOR_BITRIX_ID` — numeric doctor id from the page URL (default: 19143)
 /// - `INVITRO_DOCTOR_NAME` — alternatively, find the doctor by name (exact match
 ///   preferred; ambiguous names are rejected)
@@ -16,12 +41,22 @@ use anyhow::{Context, Result};
 /// - `INVITRO_SPECIALTY_SLUG` — specialty to watch (default: primary one)
 /// - `INVITRO_SERVICE_IDS` — comma-separated service UUIDs to watch; default: the
 ///   doctor's main service (the one used by the site's booking flow)
+///
+/// harizma45.ru (МЦ «Харизма», Курган):
+/// - `HARIZMA_DOCTOR_ID` — internal schedule id of the doctor (default: 940)
+/// - `HARIZMA_PAGE_PATH` — booking page path (default:
+///   `/register/uzi-diagnostika/vozhdaeva-anastasiya/`)
+/// - `HARIZMA_DOCTOR_NAME` — alternatively, find the doctor by name on the
+///   site's register page (exact match preferred; ambiguous names are rejected)
+///
+/// Common:
 /// - `INVITRO_POLL_INTERVAL_SECS` — seconds between polls (default: 120)
 /// - `INVITRO_STATE_FILE` — path of the JSON state file (default: ./state.json)
 /// - `INVITRO_NOTIFY_ON_FIRST_RUN` — if `1`, notify about slots available on the very
 ///   first poll (default: 1)
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub provider: Provider,
     pub telegram_bot_token: String,
     pub telegram_chat_ids: Vec<String>,
     pub dry_run: bool,
@@ -30,6 +65,9 @@ pub struct Config {
     pub city_slug: String,
     pub specialty_slug: Option<String>,
     pub service_ids: Vec<String>,
+    pub harizma_doctor_id: u64,
+    pub harizma_page_path: String,
+    pub harizma_doctor_name: Option<String>,
     pub poll_interval_secs: u64,
     pub state_file: PathBuf,
     pub notify_on_first_run: bool,
@@ -50,6 +88,10 @@ impl Config {
             .parse()
             .context("INVITRO_POLL_INTERVAL_SECS must be a number")?;
 
+        let harizma_doctor_id: u64 = env_or("HARIZMA_DOCTOR_ID", "940")
+            .parse()
+            .context("HARIZMA_DOCTOR_ID must be a number")?;
+
         let service_ids = env_or("INVITRO_SERVICE_IDS", "")
             .split(',')
             .map(|s| s.trim().to_string())
@@ -57,6 +99,7 @@ impl Config {
             .collect();
 
         Ok(Config {
+            provider: Provider::from_env(),
             telegram_bot_token,
             telegram_chat_ids,
             dry_run: env_or("INVITRO_DRY_RUN", "0") == "1",
@@ -65,6 +108,12 @@ impl Config {
             city_slug: env_or("INVITRO_CITY_SLUG", "kurgan"),
             specialty_slug: env_opt("INVITRO_SPECIALTY_SLUG"),
             service_ids,
+            harizma_doctor_id,
+            harizma_page_path: env_or(
+                "HARIZMA_PAGE_PATH",
+                "/register/uzi-diagnostika/vozhdaeva-anastasiya/",
+            ),
+            harizma_doctor_name: env_opt("HARIZMA_DOCTOR_NAME"),
             poll_interval_secs,
             state_file: PathBuf::from(env_or("INVITRO_STATE_FILE", "state.json")),
             notify_on_first_run: env_or("INVITRO_NOTIFY_ON_FIRST_RUN", "1") == "1",
@@ -148,5 +197,15 @@ mod tests {
     fn empty_input_yields_empty_list() {
         assert!(parse_chat_ids("").unwrap().is_empty());
         assert!(parse_chat_ids(" , , ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_provider() {
+        assert_eq!(parse_provider(""), Provider::Invitro);
+        assert_eq!(parse_provider("invitro"), Provider::Invitro);
+        assert_eq!(parse_provider("INVITRO"), Provider::Invitro);
+        assert_eq!(parse_provider("harizma"), Provider::Harizma);
+        assert_eq!(parse_provider("  Harizma  "), Provider::Harizma);
+        assert_eq!(parse_provider("unknown"), Provider::Invitro);
     }
 }

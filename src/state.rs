@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::invitro::AvailableSlot;
+use crate::slots::AvailableSlot;
 
 /// Identity of a previously seen slot, used for de-duplication.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
