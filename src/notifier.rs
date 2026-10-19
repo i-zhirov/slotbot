@@ -2,11 +2,18 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
-use crate::invitro::{AvailableSlot, WatchTarget};
+use crate::slots::AvailableSlot;
 use crate::telegram::Telegram;
 
 /// Telegram message length limit (4096 chars); stay safely below it.
 const MAX_MESSAGE_CHARS: usize = 3500;
+
+/// Everything the message formatter needs from the watch target:
+/// the doctor's name and the booking link (provider-specific).
+pub struct MessageCtx<'a> {
+    pub doctor_name: &'a str,
+    pub booking_link: &'a str,
+}
 
 /// Send one Telegram message per (office, service) group of new slots.
 ///
@@ -14,7 +21,7 @@ const MAX_MESSAGE_CHARS: usize = 3500;
 /// can persist progress and only retry the unsent groups later.
 pub async fn notify_new_slots<F>(
     telegram: &Telegram,
-    target: &WatchTarget,
+    ctx: &MessageCtx<'_>,
     slots: &[AvailableSlot],
     mut mark_sent: F,
 ) -> Result<()>
@@ -37,7 +44,7 @@ where
     }
 
     for ((_, office_name, _, service_name, price), group) in &groups {
-        for msg in format_messages(target, office_name, service_name, price, group) {
+        for msg in format_messages(ctx, office_name, service_name, price, group) {
             telegram.send(&msg).await?;
         }
         mark_sent(group)?;
@@ -48,7 +55,7 @@ where
 /// Build the messages for one (office, service) group, chunking date lines so
 /// each message stays under Telegram's length limit.
 fn format_messages(
-    target: &WatchTarget,
+    ctx: &MessageCtx,
     office_name: &str,
     service_name: &str,
     price: &str,
@@ -56,22 +63,25 @@ fn format_messages(
 ) -> Vec<String> {
     let mut by_date: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for s in group {
-        by_date.entry(&s.date).or_default().push(&s.time);
+        // Slots without an exact time (harizma exposes only the next
+        // appointment date) keep the date but contribute no time entries.
+        let entry = by_date.entry(&s.date).or_default();
+        if !s.time.is_empty() {
+            entry.push(&s.time);
+        }
     }
 
-    let specialty_slug = target
-        .specialty_slug
-        .as_deref()
-        .unwrap_or("ginekolog")
-        .to_lowercase();
-    let link = format!(
-        "https://www.invitro.ru/{}/vrachi/{}/{}/",
-        target.city.slug, specialty_slug, target.doctor_bitrix_id
-    );
+    // The price line doubles as the service line; keep it only when the
+    // provider reports a price (harizma has no prices on the booking page).
+    let price_line = if price.is_empty() {
+        String::new()
+    } else {
+        format!("💳 {service_name} — {price} ₽\n")
+    };
 
     let header = format!(
-        "🩺 <b>Новые слоты у врача: {}</b>\n🏥 {}\n💳 {} — {} ₽\n",
-        target.doctor_name, office_name, service_name, price
+        "🩺 <b>Новые слоты у врача: {}</b>\n🏥 {}\n{price_line}",
+        ctx.doctor_name, office_name
     );
 
     let mut messages = Vec::new();
@@ -79,14 +89,19 @@ fn format_messages(
     current.push_str(&header);
 
     for (date, times) in &by_date {
-        let mut sorted = times.clone();
-        sorted.sort();
-        let line = format!("📅 {}: {}\n", date, sorted.join(", "));
+        let line = if times.is_empty() {
+            // harizma exposes only the next-appointment date, no exact time.
+            format!("📅 {date}\n")
+        } else {
+            let mut sorted = times.clone();
+            sorted.sort();
+            format!("📅 {date}: {}\n", sorted.join(", "))
+        };
 
         // Start a new message if this line does not fit; always keep the header
         // on subsequent chunks with a "(продолжение)" marker.
         if current.len() + line.len() > MAX_MESSAGE_CHARS {
-            current.push_str(&format!("🔗 {link}"));
+            current.push_str(&format!("🔗 {}", ctx.booking_link));
             messages.push(current);
             current = String::with_capacity(MAX_MESSAGE_CHARS + 128);
             current.push_str(&header);
@@ -95,7 +110,7 @@ fn format_messages(
         current.push_str(&line);
     }
 
-    current.push_str(&format!("🔗 {link}"));
+    current.push_str(&format!("🔗 {}", ctx.booking_link));
     messages.push(current);
     messages
 }
@@ -103,27 +118,11 @@ fn format_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::invitro::{City, WatchEntry};
 
-    fn target() -> WatchTarget {
-        WatchTarget {
-            doctor_uuid: "uuid".into(),
-            doctor_bitrix_id: 19143,
-            doctor_name: "Хохлова Ольга Евгеньевна".into(),
-            city: City {
-                id: "city".into(),
-                name: "Курган".into(),
-                slug: "kurgan".into(),
-            },
-            specialty_name: "Гинеколог".into(),
-            specialty_slug: Some("ginekolog".into()),
-            entries: vec![WatchEntry {
-                office_id: "office".into(),
-                office_name: "МО Курган-4:Гоголя 133".into(),
-                service_id: "svc".into(),
-                service_name: "Прием врача в клинике".into(),
-                price: "3500.00".into(),
-            }],
+    fn ctx() -> MessageCtx<'static> {
+        MessageCtx {
+            doctor_name: "Хохлова Ольга Евгеньевна",
+            booking_link: "https://www.invitro.ru/kurgan/vrachi/ginekolog/19143/",
         }
     }
 
@@ -142,7 +141,7 @@ mod tests {
     #[test]
     fn message_contains_link_and_slots() {
         let msgs = format_messages(
-            &target(),
+            &ctx(),
             "МО Курган-4:Гоголя 133",
             "Прием врача в клинике",
             "3500.00",
@@ -164,6 +163,37 @@ mod tests {
     }
 
     #[test]
+    fn harizma_style_date_only_slot() {
+        let s = AvailableSlot {
+            office_id: "harizma-940".into(),
+            office_name: "МЦ «Харизма», г. Курган, ул. Куйбышева, 27".into(),
+            service_id: "online".into(),
+            service_name: "Онлайн-запись".into(),
+            price: String::new(),
+            date: "2026-10-19".into(),
+            time: String::new(),
+        };
+        let msgs = format_messages(
+            &MessageCtx {
+                doctor_name: "Вождаева Анастасия Викторовна",
+                booking_link: "https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/",
+            },
+            "МЦ «Харизма», г. Курган, ул. Куйбышева, 27",
+            "Онлайн-запись",
+            "",
+            &[&s],
+        );
+        assert_eq!(msgs.len(), 1);
+        let msg = &msgs[0];
+        assert!(msg.contains("Вождаева Анастасия Викторовна"));
+        assert!(msg.contains("📅 2026-10-19"));
+        assert!(!msg.contains("2026-10-19: ")); // no dangling colon for date-only slots
+        assert!(!msg.contains("—  ₽")); // no dangling price line
+        assert!(!msg.contains("💳"));
+        assert!(msg.contains("https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/"));
+    }
+
+    #[test]
     fn long_group_is_chunked() {
         let slots: Vec<AvailableSlot> = (0..300)
             .flat_map(|d| {
@@ -177,7 +207,7 @@ mod tests {
             .collect();
         let refs: Vec<&AvailableSlot> = slots.iter().collect();
         let msgs = format_messages(
-            &target(),
+            &ctx(),
             "МО Курган-4:Гоголя 133",
             "Прием врача в клинике",
             "3500.00",
