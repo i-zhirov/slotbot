@@ -7,11 +7,12 @@ use anyhow::{Context, Result};
 pub enum Provider {
     Invitro,
     Harizma,
+    Cfm,
 }
 
 impl Provider {
     /// Read `SLOTBOT_PROVIDER` from the environment (`invitro` default,
-    /// `harizma` supported). Unknown values fall back to `invitro`.
+    /// `harizma` and `cfm` supported). Unknown values fall back to `invitro`.
     pub fn from_env() -> Self {
         parse_provider(&std::env::var("SLOTBOT_PROVIDER").unwrap_or_default())
     }
@@ -20,8 +21,64 @@ impl Provider {
 fn parse_provider(raw: &str) -> Provider {
     match raw.trim().to_lowercase().as_str() {
         "harizma" => Provider::Harizma,
+        "cfm" => Provider::Cfm,
         _ => Provider::Invitro,
     }
+}
+
+/// One cfm.ru doctor to watch: the service (direction) id and the doctor,
+/// either a numeric id or a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CfmWatch {
+    pub service_id: u64,
+    pub doctor: String,
+}
+
+impl CfmWatch {
+    /// The numeric doctor id, when the doctor is configured by id.
+    pub fn doctor_id(&self) -> Option<u64> {
+        self.doctor.trim().parse().ok()
+    }
+}
+
+/// The default watch list: Коркина Ольга Владимировна, «Акушеры-гинекологи».
+const DEFAULT_CFM_DOCTORS: &str = "3:6164";
+
+/// Read the cfm.ru watch list from `CFM_DOCTORS` (default `3:6164`).
+pub fn cfm_doctors_from_env() -> Result<Vec<CfmWatch>> {
+    parse_cfm_doctors(&env_or("CFM_DOCTORS", DEFAULT_CFM_DOCTORS))
+}
+
+/// Parse `CFM_DOCTORS` (e.g. `3:6164,1089:7188`): comma-separated
+/// `<service_id>:<doctor>` entries, where the doctor is a numeric id or a
+/// name. Empty entries are skipped; the result must not be empty.
+fn parse_cfm_doctors(raw: &str) -> Result<Vec<CfmWatch>> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((service_id, doctor)) = part.split_once(':') else {
+            anyhow::bail!("CFM_DOCTORS entry '{part}' must be <service_id>:<doctor_id>");
+        };
+        let service_id: u64 = service_id
+            .trim()
+            .parse()
+            .with_context(|| format!("CFM_DOCTORS entry '{part}': service id must be a number"))?;
+        let doctor = doctor.trim();
+        if doctor.is_empty() {
+            anyhow::bail!("CFM_DOCTORS entry '{part}' has an empty doctor");
+        }
+        out.push(CfmWatch {
+            service_id,
+            doctor: doctor.to_string(),
+        });
+    }
+    if out.is_empty() {
+        anyhow::bail!("CFM_DOCTORS must contain at least one <service_id>:<doctor_id> entry");
+    }
+    Ok(out)
 }
 
 /// Runtime configuration, read from environment variables.
@@ -31,7 +88,7 @@ fn parse_provider(raw: &str) -> Provider {
 /// - `SLOTBOT_TELEGRAM_CHAT_ID` (required) — comma-separated chat ids to send
 ///   notifications to (e.g. `123,-100456`)
 /// - `SLOTBOT_DRY_RUN` — if `1`, print notifications to stdout instead of sending (default: 0)
-/// - `SLOTBOT_PROVIDER` — clinic to watch: `invitro` (default) or `harizma`
+/// - `SLOTBOT_PROVIDER` — clinic to watch: `invitro` (default), `harizma` or `cfm`
 ///
 /// Invitro.ru:
 /// - `INVITRO_DOCTOR_BITRIX_ID` — numeric doctor id from the page URL (default: 19143)
@@ -49,6 +106,12 @@ fn parse_provider(raw: &str) -> Provider {
 ///   `/register/uzi-diagnostika/vozhdaeva-anastasiya/`)
 /// - `HARIZMA_DOCTOR_NAME` — alternatively, find the doctor by name on the
 ///   site's register page (exact match preferred; ambiguous names are rejected)
+///
+/// cfm.ru (ЦСМ, Курган):
+/// - `CFM_DOCTORS` — comma-separated `<service_id>:<doctor>` pairs to watch
+///   at once, e.g. `3:6164,1089:7188`; the doctor is a numeric id or a name
+///   (exact match preferred; ambiguous names are rejected). Default: `3:6164`
+///   (Коркина Ольга Владимировна, «Акушеры-гинекологи»)
 ///
 /// Common:
 /// - `SLOTBOT_POLL_INTERVAL_SECS` — seconds between polls (default: 120)
@@ -69,6 +132,7 @@ pub struct Config {
     pub harizma_doctor_id: u64,
     pub harizma_page_path: String,
     pub harizma_doctor_name: Option<String>,
+    pub cfm_doctors: Vec<CfmWatch>,
     pub poll_interval_secs: u64,
     pub state_file: PathBuf,
     pub notify_on_first_run: bool,
@@ -93,6 +157,8 @@ impl Config {
             .parse()
             .context("HARIZMA_DOCTOR_ID must be a number")?;
 
+        let cfm_doctors = cfm_doctors_from_env()?;
+
         let service_ids = env_or("INVITRO_SERVICE_IDS", "")
             .split(',')
             .map(|s| s.trim().to_string())
@@ -115,6 +181,7 @@ impl Config {
                 "/register/uzi-diagnostika/vozhdaeva-anastasiya/",
             ),
             harizma_doctor_name: env_opt("HARIZMA_DOCTOR_NAME"),
+            cfm_doctors,
             poll_interval_secs,
             state_file: PathBuf::from(env_or("SLOTBOT_STATE_FILE", "state.json")),
             notify_on_first_run: env_or("SLOTBOT_NOTIFY_ON_FIRST_RUN", "1") == "1",
@@ -139,6 +206,10 @@ impl Config {
             harizma_doctor_id: 940,
             harizma_page_path: String::new(),
             harizma_doctor_name: None,
+            cfm_doctors: vec![CfmWatch {
+                service_id: 3,
+                doctor: "6164".into(),
+            }],
             poll_interval_secs: 120,
             state_file: PathBuf::new(),
             notify_on_first_run: false,
@@ -231,6 +302,61 @@ mod tests {
         assert_eq!(parse_provider("INVITRO"), Provider::Invitro);
         assert_eq!(parse_provider("harizma"), Provider::Harizma);
         assert_eq!(parse_provider("  Harizma  "), Provider::Harizma);
+        assert_eq!(parse_provider("cfm"), Provider::Cfm);
+        assert_eq!(parse_provider("CFM"), Provider::Cfm);
+        assert_eq!(parse_provider("  cfm  "), Provider::Cfm);
         assert_eq!(parse_provider("unknown"), Provider::Invitro);
+    }
+
+    #[test]
+    fn parses_cfm_doctors() {
+        assert_eq!(
+            parse_cfm_doctors("3:6164,1089:7188").unwrap(),
+            vec![
+                CfmWatch {
+                    service_id: 3,
+                    doctor: "6164".into(),
+                },
+                CfmWatch {
+                    service_id: 1089,
+                    doctor: "7188".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            parse_cfm_doctors(" 3 : Коркина ").unwrap(),
+            vec![CfmWatch {
+                service_id: 3,
+                doctor: "Коркина".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn cfm_watch_parses_doctor_id_or_name() {
+        let by_id = CfmWatch {
+            service_id: 3,
+            doctor: "6164".into(),
+        };
+        assert_eq!(by_id.doctor_id(), Some(6164));
+        let by_name = CfmWatch {
+            service_id: 3,
+            doctor: "Коркина".into(),
+        };
+        assert_eq!(by_name.doctor_id(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_cfm_doctors() {
+        assert!(parse_cfm_doctors("3").is_err()); // no separator
+        assert!(parse_cfm_doctors("3:").is_err()); // empty doctor
+        assert!(parse_cfm_doctors("x:6164").is_err()); // non-numeric service
+        assert!(parse_cfm_doctors("").is_err()); // no entries
+        assert!(parse_cfm_doctors(" , ").is_err()); // only empty entries
+    }
+
+    #[test]
+    fn skips_empty_cfm_doctor_entries() {
+        assert_eq!(parse_cfm_doctors("3:6164,,1089:7188,").unwrap().len(), 2);
     }
 }

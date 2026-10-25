@@ -1,3 +1,4 @@
+mod cfm;
 mod config;
 mod harizma;
 mod invitro;
@@ -12,6 +13,7 @@ mod test_http;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use cfm::{CfmClient, CfmTarget};
 use chrono::{FixedOffset, Utc};
 use config::Provider;
 use harizma::{HarizmaClient, HarizmaTarget};
@@ -49,6 +51,7 @@ async fn main() -> Result<()> {
     match cfg.provider {
         Provider::Invitro => run_watch_invitro(&cfg, once).await,
         Provider::Harizma => run_watch_harizma(&cfg, once).await,
+        Provider::Cfm => run_watch_cfm(&cfg, once).await,
     }
 }
 
@@ -117,6 +120,42 @@ async fn run_watch_harizma(cfg: &config::Config, once: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------- Cfm watch loop ----------
+
+async fn run_watch_cfm(cfg: &config::Config, once: bool) -> Result<()> {
+    let client = CfmClient::new()?;
+    let targets = resolve_cfm_with_retry(&client, cfg).await?;
+    for target in &targets {
+        info!(
+            "watching {} (id {}), {}, service {} (id {}), booking {}",
+            target.doctor_name,
+            target.doctor_id,
+            target.job,
+            target.service_name,
+            target.service_id,
+            target.booking_link()
+        );
+    }
+
+    let telegram =
+        telegram::Telegram::new(&cfg.telegram_bot_token, &cfg.telegram_chat_ids, cfg.dry_run)?;
+    let mut seen = SeenSlots::load(&cfg.state_file)?;
+    if !seen.existed_before() {
+        info!("no state file yet, first run");
+    }
+
+    loop {
+        if let Err(e) = run_cycle_cfm(&client, cfg, &targets, &telegram, &mut seen).await {
+            error!("poll cycle failed: {e:#}");
+        }
+        if once {
+            break;
+        }
+        sleep(Duration::from_secs(cfg.poll_interval_secs)).await;
+    }
+    Ok(())
+}
+
 /// Resolve the invitro watch target at startup, retrying on failure (the site
 /// may be temporarily unavailable or DDoS-Guard may be active).
 async fn resolve_with_retry(client: &InvitroClient, cfg: &config::Config) -> Result<WatchTarget> {
@@ -166,6 +205,26 @@ async fn resolve_harizma_with_retry(
             Ok(t) => return Ok(t),
             Err(e) if attempt < 5 => {
                 warn!("harizma resolve attempt {attempt} failed: {e:#}; retrying in 30s");
+                sleep(Duration::from_secs(30)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Resolve the cfm watch targets at startup, retrying on failure.
+async fn resolve_cfm_with_retry(
+    client: &CfmClient,
+    cfg: &config::Config,
+) -> Result<Vec<CfmTarget>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = client.resolve_targets(&cfg.cfm_doctors).await;
+        match result {
+            Ok(t) => return Ok(t),
+            Err(e) if attempt < 5 => {
+                warn!("cfm resolve attempt {attempt} failed: {e:#}; retrying in 30s");
                 sleep(Duration::from_secs(30)).await;
             }
             Err(e) => return Err(e),
@@ -236,8 +295,42 @@ async fn run_cycle_harizma(
     process_new_slots(cfg, telegram, seen, ctx, slots).await
 }
 
+/// One poll cycle for Cfm: poll every watched doctor. A failure of one doctor
+/// is logged and does not stop the other doctors.
+async fn run_cycle_cfm(
+    client: &CfmClient,
+    cfg: &config::Config,
+    targets: &[CfmTarget],
+    telegram: &telegram::Telegram,
+    seen: &mut SeenSlots,
+) -> Result<()> {
+    for target in targets {
+        if let Err(e) = run_cfm_target(client, cfg, target, telegram, seen).await {
+            error!("cfm target {} failed: {e:#}", target.doctor_name);
+        }
+    }
+    Ok(())
+}
+
+/// Fetch and process the slots of one cfm doctor.
+async fn run_cfm_target(
+    client: &CfmClient,
+    cfg: &config::Config,
+    target: &CfmTarget,
+    telegram: &telegram::Telegram,
+    seen: &mut SeenSlots,
+) -> Result<()> {
+    let slots = client.fetch_available_slots(target).await?;
+    let link = target.booking_link();
+    let ctx = MessageCtx {
+        doctor_name: &target.doctor_name,
+        booking_link: &link,
+    };
+    process_new_slots(cfg, telegram, seen, ctx, slots).await
+}
+
 /// Diff the fetched slots against the seen set, notify about the new ones and
-/// persist progress. Shared by both providers.
+/// persist progress. Shared by all providers.
 async fn process_new_slots(
     cfg: &config::Config,
     telegram: &telegram::Telegram,
@@ -310,6 +403,7 @@ async fn find_mode(query: &str, city: Option<&str>) -> Result<()> {
     match Provider::from_env() {
         Provider::Invitro => find_mode_invitro(query, city).await,
         Provider::Harizma => find_mode_harizma(query, city).await,
+        Provider::Cfm => find_mode_cfm(query, city).await,
     }
 }
 
@@ -384,12 +478,67 @@ async fn find_mode_harizma(query: &str, city: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+async fn find_mode_cfm(query: &str, city: Option<&str>) -> Result<()> {
+    if query.is_empty() {
+        anyhow::bail!("usage: slotbot --find <doctor name>");
+    }
+    if city.is_some() {
+        anyhow::bail!("--city is not supported for the cfm provider (one clinic in Курган)");
+    }
+    let client = CfmClient::new()?;
+    let services = client.list_services().await?;
+    let norm = normalize_name(query);
+    let mut matches = Vec::new();
+    for service in &services {
+        for doctor in client.list_doctors(service.service_id).await? {
+            if normalize_name(&doctor.full_name).contains(&norm) {
+                matches.push((service.name.clone(), doctor));
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        eprintln!("No doctors found for '{query}' on cfm.ru");
+        std::process::exit(1);
+    }
+
+    println!(
+        "Found {} doctor(s) for '{query}' on cfm.ru (Курган):",
+        matches.len()
+    );
+    for (service_name, doctor) in &matches {
+        let target = CfmTarget::from_item(doctor, service_name);
+        println!(
+            "\n{} (id={}, {})\n  service: {} (id={})\n  booking page: {}",
+            doctor.full_name,
+            doctor.doctor_id,
+            doctor.job,
+            service_name,
+            doctor.service_id,
+            target.booking_link()
+        );
+        let page = client
+            .doctor_page(doctor.service_id, doctor.doctor_id)
+            .await?;
+        println!(
+            "  свободные даты: {}",
+            if page.free_dates.is_empty() {
+                "нет".to_string()
+            } else {
+                page.free_dates.join(", ")
+            }
+        );
+    }
+    Ok(())
+}
+
 /// `--check`: resolve and print the watch target (doctor, city, services)
 /// without polling or requiring Telegram credentials.
 async fn check_mode() -> Result<()> {
     match Provider::from_env() {
         Provider::Invitro => check_mode_invitro().await,
         Provider::Harizma => check_mode_harizma().await,
+        Provider::Cfm => check_mode_cfm().await,
     }
 }
 
@@ -514,6 +663,53 @@ async fn check_mode_harizma() -> Result<()> {
     Ok(())
 }
 
+async fn check_mode_cfm() -> Result<()> {
+    let client = CfmClient::new()?;
+    let watches = config::cfm_doctors_from_env()
+        .context("failed to parse the doctor list; check CFM_DOCTORS")?;
+    let targets = client
+        .resolve_targets(&watches)
+        .await
+        .context("failed to resolve the doctors; check CFM_DOCTORS")?;
+
+    for (i, target) in targets.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!(
+            "Doctor:     {} (id={})",
+            target.doctor_name, target.doctor_id
+        );
+        println!("Specialty:  {}", target.job);
+        println!(
+            "Service:    {} (id={})",
+            target.service_name, target.service_id
+        );
+        println!("Booking:    {}", target.booking_link());
+
+        let page = client
+            .doctor_page(target.service_id, target.doctor_id)
+            .await?;
+        println!("\nСвободные даты:");
+        if page.free_dates.is_empty() {
+            println!("  (none)");
+        }
+        for date in &page.free_dates {
+            println!("  - {date}");
+        }
+
+        let slots = client.fetch_available_slots(target).await?;
+        println!("\nAvailable slots:");
+        if slots.is_empty() {
+            println!("  (none)");
+        }
+        for s in &slots {
+            println!("  - {} {}", s.date, s.time);
+        }
+    }
+    Ok(())
+}
+
 fn today_yekt() -> String {
     let tz = FixedOffset::east_opt(YEKT).expect("valid offset");
     Utc::now().with_timezone(&tz).format("%Y-%m-%d").to_string()
@@ -577,6 +773,15 @@ mod tests {
     #[tokio::test]
     async fn find_harizma_rejects_city() {
         let err = find_mode_harizma("Вождаева", Some("kurgan"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--city is not supported"));
+    }
+
+    #[tokio::test]
+    async fn find_cfm_rejects_city() {
+        let err = find_mode_cfm("Коркина", Some("kurgan"))
             .await
             .unwrap_err()
             .to_string();

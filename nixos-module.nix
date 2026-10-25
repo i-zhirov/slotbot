@@ -30,8 +30,9 @@ let
       type = lib.types.str;
       default = "invitro";
       description = ''
-        Clinic booking system to watch: `invitro` (default) or `harizma`
-        (harizma45.ru, МЦ «Харизма», Курган).
+        Clinic booking system to watch: `invitro` (default), `harizma`
+        (harizma45.ru, МЦ «Харизма», Курган) or `cfm`
+        (cfm.ru, ЦСМ, Курган).
       '';
     };
 
@@ -86,6 +87,16 @@ let
       description = "Alternative to harizmaDoctorId: find the doctor by name on the harizma45.ru register page. Exact full-name match is preferred; ambiguous names are rejected.";
     };
 
+    cfmDoctors = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "3:6164" ];
+      description = ''
+        cfm.ru doctors to watch at once, as `<service_id>:<doctor_id>` pairs
+        (the doctor may also be a name). Default: Коркина (3:6164); add
+        Репин with `cfmDoctors = [ "3:6164" "1089:7188" ]`.
+      '';
+    };
+
     pollIntervalSecs = lib.mkOption {
       type = lib.types.int;
       default = 120;
@@ -113,7 +124,7 @@ let
     extraEnvironment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      description = "Additional SLOTBOT_*/INVITRO_*/HARIZMA_* environment variables for this instance (merged with the top-level ones).";
+      description = "Additional SLOTBOT_*/INVITRO_*/HARIZMA_*/CFM_* environment variables for this instance (merged with the top-level ones).";
     };
   };
 
@@ -134,6 +145,7 @@ let
         "SLOTBOT_NOTIFY_ON_FIRST_RUN=${if inst.notifyOnFirstRun then "1" else "0"}"
         "HARIZMA_DOCTOR_ID=${toString inst.harizmaDoctorId}"
         "HARIZMA_PAGE_PATH=${inst.harizmaPagePath}"
+        "CFM_DOCTORS=${lib.concatStringsSep "," inst.cfmDoctors}"
       ] ++ lib.optional (inst.doctorName != null) "INVITRO_DOCTOR_NAME=${inst.doctorName}"
         ++ lib.optional (inst.specialtySlug != null) "INVITRO_SPECIALTY_SLUG=${inst.specialtySlug}"
         ++ lib.optional (inst.serviceIds != []) "INVITRO_SERVICE_IDS=${lib.concatStringsSep "," inst.serviceIds}"
@@ -228,6 +240,8 @@ in
         clinics can be watched at the same time, e.g.:
 
         instances.harizma.provider = "harizma"; # Вождаева on harizma45.ru
+        instances.cfm.provider = "cfm";         # Коркина on cfm.ru
+        instances.cfm.cfmDoctors = [ "3:6164" "1089:7188" ]; # + Репин
       '';
     };
   } // instanceOptions;
