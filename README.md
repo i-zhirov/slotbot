@@ -8,8 +8,13 @@ new slots appear for a doctor. Several providers are supported:
 - **harizma45.ru** (МЦ «Харизма», Курган, ул. Куйбышева, 27):
   <https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/>
   — Вождаева Анастасия Викторовна, врач УЗИ-диагностики.
+- **cfm.ru** (ЦСМ, Курган, ул. Карбышева, 39):
+  <https://www.cfm.ru/kurgan/doctors/korkina-olga-vladimirovna/>
+  — Коркина Ольга Владимировна, врач акушер-гинеколог, репродуктолог.
+  Several doctors can be watched at once, e.g. Репин Сергей Сергеевич,
+  врач-уролог, with `CFM_DOCTORS=3:6164,1089:7188`.
 
-Select the provider with `SLOTBOT_PROVIDER` (`invitro` default, `harizma`).
+Select the provider with `SLOTBOT_PROVIDER` (`invitro` default, `harizma`, `cfm`).
 
 Written in Rust: a single static binary (~10 MB), no runtime dependencies —
 suitable for a small NixOS VPS. Polls the clinic site every
@@ -46,6 +51,26 @@ notification means "the doctor's next online appointment is now on this date".
 The register pages also list every doctor (all specialties) with their current
 "ближайший прием", which `--find` uses to search by name.
 
+### cfm.ru
+
+cfm.ru is a WordPress site without a public JSON API. The booking flow is
+server-rendered and has four steps:
+
+1. `GET /kurgan/zapis/?step=1` — the directions (services) of the city.
+2. `GET /kurgan/zapis/?step=2&service={id}&clinic=0` — the doctors of one
+   service with their prices.
+3. `GET /kurgan/zapis/?step=2&service={id}&clinic=0&doctor={id}` — the
+   doctor's free dates, embedded as a JS array (`freeDates`).
+4. `GET /kurgan/zapis/?step=2&…&date={YYYY-MM-DD}` — the free times of one
+   date as `step=3` links.
+
+The theme answers these URLs with its 404 page unless the request looks like the
+site's own booking iframe, so the bot sends `Sec-Fetch-Dest: iframe` (plus the
+matching mode and site headers). Every `<service_id>:<doctor>` pair of
+`CFM_DOCTORS` is watched at once; a failure of one doctor does not stop the
+other doctors. `--find` walks every service and its doctors, so it finds a doctor
+by name without knowing the service id.
+
 New slots (office + service + date + time never seen before) trigger a Telegram
 message grouped by office/service. The set of already-notified slots is persisted
 in a state file, so restarts never re-notify.
@@ -53,14 +78,14 @@ in a state file, so restarts never re-notify.
 ## Configuration (environment variables)
 
 Shared variables use the `SLOTBOT_` prefix. Provider-specific variables use the
-`INVITRO_` or `HARIZMA_` prefix.
+`INVITRO_`, `HARIZMA_` or `CFM_` prefix.
 
 | Variable | Default | Description |
 |---|---|---|
 | `SLOTBOT_TELEGRAM_BOT_TOKEN` | — (required) | Bot token from [@BotFather](https://t.me/BotFather) |
 | `SLOTBOT_TELEGRAM_CHAT_ID` | — (required) | Comma-separated chat ids to send notifications to, e.g. `733839622,450097973` |
 | `SLOTBOT_DRY_RUN` | `0` | `1` = print notifications to stdout instead of sending |
-| `SLOTBOT_PROVIDER` | `invitro` | Clinic to watch: `invitro` or `harizma` |
+| `SLOTBOT_PROVIDER` | `invitro` | Clinic to watch: `invitro`, `harizma` or `cfm` |
 | `INVITRO_DOCTOR_BITRIX_ID` | `19143` | Numeric doctor id from the Invitro page URL |
 | `INVITRO_DOCTOR_NAME` | — | Alternative to `INVITRO_DOCTOR_BITRIX_ID`: find the doctor by name (exact full-name match preferred; ambiguous names are rejected with the candidate list) |
 | `INVITRO_CITY_SLUG` | `kurgan` | City slug from the page URL; `--find --city <slug>` overrides it for the search |
@@ -69,6 +94,7 @@ Shared variables use the `SLOTBOT_` prefix. Provider-specific variables use the
 | `HARIZMA_DOCTOR_ID` | `940` | Internal schedule id of the harizma45.ru doctor |
 | `HARIZMA_PAGE_PATH` | `/register/uzi-diagnostika/vozhdaeva-anastasiya/` | Booking page path on harizma45.ru |
 | `HARIZMA_DOCTOR_NAME` | — | Alternative to `HARIZMA_DOCTOR_ID`: find the doctor by name on the register page |
+| `CFM_DOCTORS` | `3:6164` | Comma-separated `<service_id>:<doctor>` pairs to watch at once, e.g. `3:6164,1089:7188`; the doctor is a numeric id or a name (Коркина and Репин by default are `3:6164` and `1089:7188`) |
 | `SLOTBOT_POLL_INTERVAL_SECS` | `120` | Seconds between polls |
 | `SLOTBOT_STATE_FILE` | `state.json` | Path of the de-duplication state file |
 | `SLOTBOT_NOTIFY_ON_FIRST_RUN` | `1` | `1` = notify about currently open slots on the first poll; `0` = record them as baseline silently |
@@ -100,6 +126,20 @@ SLOTBOT_PROVIDER=harizma ./target/release/slotbot --check
 #    booking page: https://harizma45.ru/register/uzi-diagnostika/vozhdaeva-anastasiya/
 #    Ближайший прием: ...
 
+# The same commands for ЦСМ в Кургане (cfm.ru):
+SLOTBOT_PROVIDER=cfm ./target/release/slotbot --find "Коркина"
+SLOTBOT_PROVIDER=cfm ./target/release/slotbot --check
+# -> Коркина Ольга Владимировна (id=6164, врач акушер-гинеколог, репродуктолог)
+#    service: Акушеры-гинекологи (id=3)
+#    booking page: https://www.cfm.ru/kurgan/zapis/?step=2&service=3&clinic=0&doctor=6164
+
+# Find Репин (врач-уролог); --find searches every service, so no ids are needed:
+SLOTBOT_PROVIDER=cfm ./target/release/slotbot --find "Репин"
+# -> Репин Сергей Сергеевич (id=7188, Врач-уролог)
+#    service: Уролог (id=1089)
+#    booking page: https://www.cfm.ru/kurgan/zapis/?step=2&service=1089&clinic=0&doctor=7188
+# Watch him together with Коркина via CFM_DOCTORS=3:6164,1089:7188.
+
 # Run a single poll cycle (needs the two Telegram vars; use SLOTBOT_DRY_RUN=1 to test):
 SLOTBOT_DRY_RUN=1 \
 SLOTBOT_TELEGRAM_BOT_TOKEN=123:abc \
@@ -108,6 +148,12 @@ SLOTBOT_TELEGRAM_CHAT_ID=456 \
 
 # Watch harizma45.ru for Вождаева:
 SLOTBOT_PROVIDER=harizma \
+SLOTBOT_TELEGRAM_BOT_TOKEN=123:abc \
+SLOTBOT_TELEGRAM_CHAT_ID=456 \
+./target/release/slotbot
+
+# Watch cfm.ru (ЦСМ, Курган) for Коркина:
+SLOTBOT_PROVIDER=cfm \
 SLOTBOT_TELEGRAM_BOT_TOKEN=123:abc \
 SLOTBOT_TELEGRAM_CHAT_ID=456 \
 ./target/release/slotbot
@@ -159,8 +205,8 @@ SLOTBOT_TELEGRAM_CHAT_ID=456
 
 Everything else can be overridden through the module options
 (`provider`, `doctorBitrixId`, `citySlug`, `specialtySlug`, `serviceIds`,
-`harizmaDoctorId`, `harizmaPagePath`, `harizmaDoctorName`, `pollIntervalSecs`,
-`notifyOnFirstRun`).
+`harizmaDoctorId`, `harizmaPagePath`, `harizmaDoctorName`, `cfmDoctors`,
+`pollIntervalSecs`, `notifyOnFirstRun`).
 
 ### Watching several clinics at once
 
@@ -184,6 +230,15 @@ services.slotbot = {
   instances.harizma = {
     provider = "harizma";
     # HARIZMA_DOCTOR_ID / HARIZMA_PAGE_PATH default to Вождаева (id 940)
+  };
+
+  # unit slotbot-cfm: Коркина on cfm.ru (ЦСМ, Курган)
+  instances.cfm = {
+    provider = "cfm";
+    # CFM_DOCTORS defaults to Коркина (3:6164)
+
+    # or watch Коркина and Репин (врач-уролог) at once:
+    # cfmDoctors = [ "3:6164" "1089:7188" ];
   };
 };
 ```

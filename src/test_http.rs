@@ -9,9 +9,12 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-/// A canned response. A request is matched to a route by its path (the target
-/// without the query string).
+/// A canned response. A request is matched to a route by its whole target
+/// (query string included) first, then by its path (the target without the
+/// query string).
 pub struct Route {
+    /// Full request target, when the route must match the query string.
+    target: Option<String>,
     path: String,
     content_type: &'static str,
     body: String,
@@ -20,6 +23,7 @@ pub struct Route {
 impl Route {
     pub fn json(path: &str, body: &str) -> Self {
         Self {
+            target: None,
             path: path.to_string(),
             content_type: "application/json",
             body: body.to_string(),
@@ -28,7 +32,19 @@ impl Route {
 
     pub fn html(path: &str, body: &str) -> Self {
         Self {
+            target: None,
             path: path.to_string(),
+            content_type: "text/html; charset=utf-8",
+            body: body.to_string(),
+        }
+    }
+
+    /// A route that matches the whole request target, query string included.
+    /// Use it when one path answers differently per query string.
+    pub fn html_query(target: &str, body: &str) -> Self {
+        Self {
+            target: Some(target.to_string()),
+            path: target.to_string(),
             content_type: "text/html; charset=utf-8",
             body: body.to_string(),
         }
@@ -68,7 +84,10 @@ impl MockServer {
                 tokio::spawn(async move {
                     if let Some(req) = read_request(&mut stream).await {
                         let path = req.target.split('?').next().unwrap_or(&req.target);
-                        let route = routes.iter().find(|r| r.path == path);
+                        let route = routes
+                            .iter()
+                            .find(|r| r.target.as_deref() == Some(req.target.as_str()))
+                            .or_else(|| routes.iter().find(|r| r.path == path));
                         let (content_type, body) = match route {
                             Some(r) => (r.content_type, r.body.as_str()),
                             None => ("application/json", ""),
